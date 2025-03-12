@@ -1,0 +1,150 @@
+#include "AS5600.h"
+#include "Wire.h"
+
+// Define o endereço I2C do AS5600
+#define AS5600_ADDRESS 0x36
+
+// Criando dois objetos I2C
+TwoWire I2C_1 = TwoWire(0);
+TwoWire I2C_2 = TwoWire(1);
+
+// Definição dos pinos para cada barramento
+#define SDA_1 21 // alterar os valores
+#define SCL_1 22
+
+#define SDA_2 25
+#define SCL_2 26
+
+// Variáveis para armazenar o ângulo e o tempo anterior de cada encoder
+float prevAngle1 = 0;
+unsigned long prevTime1 = 0;
+
+float prevAngle2 = 0;
+unsigned long prevTime2 = 0;
+
+// Variáveis para leitura do ângulo e cálculo de RPM
+float angle1 = 0;
+float angle2 = 0;
+float rpm1 = 0;
+float rpm2 = 0;
+
+// Criando dois objetos AS5600
+AS5600 as5600_1;
+AS5600 as5600_2;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println(__FILE__);
+  Serial.print("AS5600_LIB_VERSION: ");
+  Serial.println(AS5600_LIB_VERSION);
+
+  // Inicializando os dois barramentos I2C
+  I2C_1.begin(SDA_1, SCL_1); // conferir a frequência
+  I2C_2.begin(SDA_2, SCL_2);
+
+  // Configurando os encoders
+  as5600_1.begin(4, &I2C_1);  // set direction pin and I2C bus
+  as5600_1.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+
+  as5600_2.begin(4, &I2C_2);  // set direction pin and I2C bus
+  as5600_2.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+
+  Serial.println(as5600_1.getAddress());
+  Serial.println(as5600_2.getAddress());
+
+  int b1 = as5600_1.isConnected();
+  int b2 = as5600_2.isConnected();
+  Serial.print("Connect 1: ");
+  Serial.println(b1);
+  Serial.print("Connect 2: ");
+  Serial.println(b2);
+
+  delay(1000);
+}
+
+void loop() {
+  unsigned long currentTime = millis(); // Obtém o tempo atual
+
+  // Lê o ângulo e calcula a velocidade para o primeiro encoder
+  angle1 = ReadRawAngle(&I2C_1);
+  rpm1 = CalculateRPM(angle1, prevAngle1, currentTime, prevTime1);
+  prevAngle1 = angle1;
+  prevTime1 = currentTime;
+
+  // Lê o ângulo e calcula a velocidade para o segundo encoder
+  angle2 = ReadRawAngle(&I2C_2);
+  rpm2 = CalculateRPM(angle2, prevAngle2, currentTime, prevTime2);
+  prevAngle2 = angle2;
+  prevTime2 = currentTime;
+
+  // Exibe os ângulos e velocidades no monitor serial
+  Serial.print("Encoder 1 - Ângulo: ");
+  Serial.print(angle1, 2);
+  Serial.print("°, RPM: ");
+  Serial.print(rpm1, 2);
+  Serial.println(" RPM");
+
+  Serial.print("Encoder 2 - Ângulo: ");
+  Serial.print(angle2, 2);
+  Serial.print("°, RPM: ");
+  Serial.print(rpm2, 2);
+  Serial.println(" RPM");
+
+  delay(100); // Atraso para evitar leituras muito rápidas
+}
+
+float ReadRawAngle(TwoWire *wire) {
+  uint8_t lowbyte, highbyte;
+  uint16_t rawAngle;
+
+  // Leitura do byte baixo (bits 7:0)
+  wire->beginTransmission(AS5600_ADDRESS);
+  wire->write(0x0D); // Registro do byte baixo do ângulo bruto
+  wire->endTransmission();
+  wire->requestFrom(AS5600_ADDRESS, 1);
+
+  while (wire->available() == 0); // Espera até que os dados estejam disponíveis
+  lowbyte = wire->read();
+
+  // Leitura do byte alto (bits 11:8)
+  wire->beginTransmission(AS5600_ADDRESS);
+  wire->write(0x0C); // Registro do byte alto do ângulo bruto
+  wire->endTransmission();
+  wire->requestFrom(AS5600_ADDRESS, 1);
+
+  while (wire->available() == 0);
+  highbyte = wire->read();
+
+  // Combina os bytes alto e baixo para formar o ângulo bruto de 12 bits
+  rawAngle = (highbyte << 8) | lowbyte;
+
+  // Converte o ângulo bruto para graus
+  return rawAngle * 0.087890625;
+}
+
+float CalculateRPM(float currentAngle, float &prevAngle, unsigned long currentTime, unsigned long &prevTime) {
+  if (prevTime == 0) {
+    prevTime = currentTime;
+    prevAngle = currentAngle;
+    return 0; // Retorna 0 na primeira leitura
+  }
+
+  // Calcula a diferença de ângulo e tempo
+  float deltaAngle = currentAngle - prevAngle;
+  unsigned long deltaTime = currentTime - prevTime;
+
+  // Ajusta a diferença de ângulo para o caso de ultrapassar 360°
+  if (deltaAngle > 180) {
+    deltaAngle -= 360;
+  } else if (deltaAngle < -180) {
+    deltaAngle += 360;
+  }
+
+  // Converte o tempo de milissegundos para segundos
+  float deltaTimeSeconds = deltaTime / 1000.0;
+
+  // Calcula a velocidade em RPM
+  float rpm = (deltaAngle / deltaTimeSeconds) * (1.0 / 6.0); // Fórmula para RPM
+
+  return rpm;
+}
