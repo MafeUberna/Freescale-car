@@ -1,0 +1,194 @@
+
+
+#include "AS5600.h"
+#include "Wire.h"
+
+// Define o endereço I2C do AS5600
+#define AS5600_ADDRESS 0x36
+
+// Criando dois objetos I2C
+TwoWire I2C_1 = TwoWire(0);
+TwoWire I2C_2 = TwoWire(1);
+
+// Definição dos pinos para cada barramento
+#define SDA_1 21 // alterar os valores
+#define SCL_1 22
+
+#define SDA_2 25
+#define SCL_2 26
+
+//-----------------------------Definição de variáveis--------------------
+// Coeficientes do filtro passa-baixa
+const float b0 = 0.01546504;
+const float b1 = 0.01546504;
+const float a1 = 0.96906992;
+
+// Coeficientes do controlador digital
+const float a = 1.1069;
+const float b = 0.8435;
+const float c = 1.0;
+const float d = 1.0;
+
+// Variáveis para o filtro passa-baixa (para cada encoder)
+float x_prev_1 = 0, y_prev_1 = 0; // Encoder 1
+float x_prev_2 = 0, y_prev_2 = 0; // Encoder 2
+
+// Variáveis para o controlador digital (para cada encoder)
+float y_prev_control_1 = 0, e_prev_1 = 0, u_prev_1 = 0; // Encoder 1
+float y_prev_control_2 = 0, e_prev_2 = 0, u_prev_2 = 0; // Encoder 2
+
+// Variáveis para cálculo da velocidade (para cada encoder)
+float prevAngle_1 = 0, prevAngle_2 = 0; // Ângulos anteriores
+unsigned long prevTime_1 = 0, prevTime_2 = 0; // Tempos anteriores
+float setpoint_rpm = 60.0; // Velocidade desejada em RPM (ajuste conforme necessário)
+
+// Criando dois objetos AS5600
+AS5600 as5600_1;
+AS5600 as5600_2;
+//--------------------------Criando Protótipos das Funções-----------------------------
+float ReadRawAngle(TwoWire *wire); // ler o ângulo bruto do encoder
+float CalculateRPM(float currentAngle, unsigned long currentTime, float &prevAngle, unsigned long &prevTime); //calcular a velocidade em RPM
+float lowPassFilter(float input, float &x_prev, float &y_prev); //aplicar o filtro passa-baixa
+float DigitalController(float measured_rpm, float &y_prev_control, float &e_prev, float &u_prev); // aplicar o controlador
+
+// ------------------------------Funções----------------------------------
+ReadRawAngle(TwoWire *wire) {
+    uint8_t lowbyte, highbyte;
+    uint16_t rawAngle;
+
+    // Leitura do byte baixo (bits 7:0)
+    wire->beginTransmission(0x36); // Endereço do AS5600
+    wire->write(0x0D); // Registro do byte baixo do ângulo bruto
+    wire->endTransmission();
+    wire->requestFrom(0x36, 1);
+
+    while (wire->available() == 0); // Espera até que os dados estejam disponíveis
+    lowbyte = wire->read();
+
+    // Leitura do byte alto (bits 11:8)
+    wire->beginTransmission(0x36);
+    wire->write(0x0C); // Registro do byte alto do ângulo bruto
+    wire->endTransmission();
+    wire->requestFrom(0x36, 1);
+
+    while (wire->available() == 0);
+    highbyte = wire->read();
+
+    // Combina os bytes alto e baixo para formar o ângulo bruto de 12 bits
+    rawAngle = (highbyte << 8) | lowbyte;
+
+    // Converte o ângulo bruto para graus
+    return rawAngle * 0.087890625;
+}
+
+// ---------------------------------------------------------------------------
+
+CalculateRPM(float currentAngle, unsigned long currentTime, float &prevAngle, unsigned long &prevTime) {
+    if (prevTime == 0) {
+        prevTime = currentTime;
+        prevAngle = currentAngle;
+        return 0; // Retorna 0 na primeira leitura
+    }
+
+    // Calcula a diferença de ângulo e tempo
+    float deltaAngle = currentAngle - prevAngle;
+    unsigned long deltaTime = currentTime - prevTime;
+
+    // Ajusta a diferença de ângulo para o caso de ultrapassar 360°
+    if (deltaAngle > 180) {
+        deltaAngle -= 360;
+    } else if (deltaAngle < -180) {
+        deltaAngle += 360;
+    }
+
+    // Converte o tempo de milissegundos para segundos
+    float deltaTimeSeconds = deltaTime / 1000.0;
+
+    // Calcula a velocidade em RPM
+    float rpm = (deltaAngle / deltaTimeSeconds) * (1.0 / 6.0); // Fórmula para RPM
+
+    // Atualiza o ângulo e o tempo anteriores
+    prevAngle = currentAngle;
+    prevTime = currentTime;
+
+    return rpm;
+}
+//------------------------------------------------------------------
+lowPassFilter(float input, float &x_prev, float &y_prev) {
+    float output = b0 * input + b1 * x_prev - a1 * y_prev;
+    x_prev = input;
+    y_prev = output;
+    return output;
+}
+//------------------------------------------------------------------
+DigitalController(float measured_rpm, float &y_prev_control, float &e_prev, float &u_prev) {
+    float error = setpoint_rpm - measured_rpm; // Erro atual
+    float y = a * y_prev_control + b * error + c * e_prev + d * u_prev; // Saída do controlador
+    y_prev_control = y; // Atualiza a saída anterior
+    e_prev = error; // Atualiza o erro anterior
+    u_prev = y; // Atualiza o sinal de controle anterior
+    return y;
+}
+// ----------------void setup e loop--------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial.println(__FILE__);
+  Serial.print("AS5600_LIB_VERSION: ");
+  Serial.println(AS5600_LIB_VERSION);
+
+  // Inicializando os dois barramentos I2C
+  I2C_1.begin(SDA_1, SCL_1); // conferir a frequência
+  I2C_2.begin(SDA_2, SCL_2);
+
+  // Configurando os encoders
+  as5600_1.begin(4, &I2C_1);  // set direction pin and I2C bus
+  as5600_1.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+
+  as5600_2.begin(4, &I2C_2);  // set direction pin and I2C bus
+  as5600_2.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+
+  Serial.println(as5600_1.getAddress());
+  Serial.println(as5600_2.getAddress());
+
+  int b1 = as5600_1.isConnected();
+  int b2 = as5600_2.isConnected();
+  Serial.print("Connect 1: ");
+  Serial.println(b1);
+  Serial.print("Connect 2: ");
+  Serial.println(b2);
+
+  delay(1000);
+}
+
+void loop() {
+      unsigned long currentTime = millis(); // Obtém o tempo atual
+
+    // Leitura do ângulo do Encoder 1
+    float currentAngle_1 = ReadRawAngle(&I2C_1);
+    float measured_rpm_1 = CalculateRPM(currentAngle_1, currentTime, prevAngle_1, prevTime_1);
+    float filtered_rpm_1 = lowPassFilter(measured_rpm_1, x_prev_1, y_prev_1);
+    float control_signal_1 = DigitalController(filtered_rpm_1, y_prev_control_1, e_prev_1, u_prev_1);
+
+    // Leitura do ângulo do Encoder 2
+    float currentAngle_2 = ReadRawAngle(&I2C_2);
+    float measured_rpm_2 = CalculateRPM(currentAngle_2, currentTime, prevAngle_2, prevTime_2);
+    float filtered_rpm_2 = lowPassFilter(measured_rpm_2, x_prev_2, y_prev_2);
+    float control_signal_2 = DigitalController(filtered_rpm_2, y_prev_control_2, e_prev_2, u_prev_2);
+
+    // Exibe os valores no monitor serial
+    Serial.print("Encoder 1 - Velocidade Medida: ");
+    Serial.print(measured_rpm_1, 2);
+    Serial.print(" RPM, Velocidade Filtrada: ");
+    Serial.print(filtered_rpm_1, 2);
+    Serial.print(" RPM, Sinal de Controle: ");
+    Serial.println(control_signal_1, 2);
+
+    Serial.print("Encoder 2 - Velocidade Medida: ");
+    Serial.print(measured_rpm_2, 2);
+    Serial.print(" RPM, Velocidade Filtrada: ");
+    Serial.print(filtered_rpm_2, 2);
+    Serial.print(" RPM, Sinal de Controle: ");
+    Serial.println(control_signal_2, 2);
+
+  delay(100); // Atraso para evitar leituras muito rápidas
+}
