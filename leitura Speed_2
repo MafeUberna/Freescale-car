@@ -55,7 +55,7 @@ void loop() {
   delay(100); // Atraso para evitar leituras muito rápidas
 }
 
-float ReadRawAngle(TwoWire *wire) {
+float ReadRawAngle() {
   uint8_t lowbyte, highbyte;
   uint16_t rawAngle;
 
