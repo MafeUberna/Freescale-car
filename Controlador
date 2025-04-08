@@ -1,0 +1,194 @@
+#include "AS5600.h"
+#include "ESP32TimerInterrupt.h"
+
+//Pinos do sensor encoder AS5600
+#define SDA_1 8
+#define SCL_1 9
+//Pinos do motor
+#define in1 13
+#define in2 14
+#define ENA 12
+#define in3 6
+#define in4 7
+#define ENB 5
+
+#define PWM_FREQ  10000
+#define PWM_RES   10
+
+AS5600 as5600;
+
+//============================================ VARIÁVEIS =============================================
+
+// Variáveis do cálculo da velocidade RPM pelo sensor
+const int setpoint = 500; // Em RPM
+float sensorRPM = 0;
+unsigned long prevTime = 0;
+int32_t prevPosition = 0;
+float deltaTime = 0;
+static uint32_t lastTime = 0;
+uint32_t currentTime = 0;
+int32_t currentPosition = 0;
+float deltaPosition = 0; // 4096 passos por revolução
+float RPM = 0;
+
+// Coeficientes do controlador digital
+float a = 1.1069, b = 0.8435, c = 1, d = 1;
+
+// Variáveis de controle
+float erro_0 = 0, erro_1 = 0, erro_2 = 0; // e[k], e[k-1], e[k-2]
+float u_0 = 0, u_1 = 0; // u[k], u[k-1]
+
+// Filtro de média móvel
+#define N 10
+float rpmBuffer[N] = {0};
+int rpmIndex = 0;
+
+// =========================================== PROTÓTIPO ===============================================
+
+volatile bool applyControl = false;
+
+// Criação do timer com o canal 0
+ESP32Timer ITimer(0);
+
+// Função chamada a cada 10 ms
+bool IRAM_ATTR onTimer(void* arg) {
+  applyControl = true;
+  return true;
+}
+
+// =========================================== SETUP ===============================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Iniciando...");
+
+  Wire.begin(SDA_1, SCL_1);
+  as5600.setDirection(AS5600_CLOCK_WISE);  
+
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  ledcAttachPin(ENA, 0);
+  ledcAttachPin(ENB, 1);
+  ledcSetup(0, PWM_FREQ, PWM_RES);
+  ledcSetup(1, PWM_FREQ, PWM_RES);
+
+  // Inicializa posição cumulativa
+  prevPosition = as5600.getCumulativePosition();
+  prevTime = millis();
+
+  ITimer.attachInterruptInterval(10000, onTimer);
+
+  delay(1000);
+}
+
+// ======================================== FUNÇÕES ===================================================
+
+// ----------------------Função para calcular RPM----------------------
+float calculateRPM() {
+  currentTime = millis();
+  deltaTime = (currentTime - prevTime) / 60000.0;  // Tempo em minutos
+
+  if (deltaTime <= 0) return 0;
+
+  currentPosition = as5600.getCumulativePosition();
+  deltaPosition = (currentPosition - prevPosition) / 4096.0; // 4096 passos por revolução
+  RPM = deltaPosition / deltaTime;
+
+  // Atualiza valores anteriores
+  prevTime = currentTime;
+  prevPosition = currentPosition;
+
+  return RPM;
+}
+
+// ------------------Filtro de média móvel-----------------------
+float filtroMediaMovel(float novoValor) {
+  rpmBuffer[rpmIndex] = novoValor;
+  rpmIndex = (rpmIndex + 1) % N;
+
+  float soma = 0;
+  for (int i = 0; i < N; i++) {
+    soma += rpmBuffer[i];
+  }
+
+  return soma / N;
+}
+
+// --------------------Função de controle digital----------------------
+int speedControl(float erro) {
+  erro_2 = erro_1;
+  erro_1 = erro_0;
+  erro_0 = erro;
+
+  u_0 = a * u_1 + b * erro_0 + c * erro_1 + d * erro_2;
+  u_0 = constrain(u_0, 0, 100); 
+  u_1 = u_0; // Atualiza histórico de controle
+
+  int pwm = map((int)u_0, 0, 100, 0, 255);
+  return constrain(pwm, 0, 255);
+}
+
+//--------------------Funções de controle dos motores------------------
+
+//-----------------------------MOTOR A
+void MotorAForward(int PWM) {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  ledcWrite(0, PWM);
+}
+void MotorABackwards(int PWM) {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  ledcWrite(0, PWM);
+}
+void MotorAStop(int PWM) {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  ledcWrite(0, PWM);
+}
+//------------------------------MOTOR B
+void MotorBForward(int PWM) {
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  ledcWrite(1, PWM);
+}
+void MotorBBackwards(int PWM) {
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  ledcWrite(1, PWM);
+}
+void MotorBStop(int PWM) {
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+  ledcWrite(1, PWM);
+}
+//---------------------------MOTOR STOP
+void MotorStop(int PWM) {
+  MotorAStop(PWM);
+  MotorBStop(PWM);
+}
+
+// ======================================== LOOP ====================================================
+void loop() {
+  if (applyControl) {
+    applyControl = false;
+
+    float rpmAtual = calculateRPM();
+    sensorRPM = filtroMediaMovel(rpmAtual);
+
+    float erro = setpoint - sensorRPM;
+    int pwm = speedControl(erro);
+
+    MotorBForward(pwm);
+
+    Serial.print("RPM: ");
+    Serial.print(sensorRPM);
+    Serial.print(" | PWM: ");
+    Serial.print(pwm);
+    Serial.print(" | u_0: ");
+    Serial.println(u_0);
+  }
+}
